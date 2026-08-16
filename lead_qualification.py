@@ -259,6 +259,51 @@ def save_lead_score(brand_id, score, rationale):
         conn.close()
 
 
+def get_qualification_status(score, current_status):
+    """
+    Determine qualification result from lead score.
+
+    This function does not modify the database.
+
+    Scores:
+    - 80-100: qualified
+    - 60-79: watch
+    - 0-59: rejected
+
+    Workflow statuses are protected from automatic
+    score-based status changes once outreach has progressed.
+    """
+
+    protected_statuses = {
+        "message_drafted",
+        "waiting_for_approval",
+        "approved_ready_to_send",
+        "message_rejected",
+        "sent",
+        "replied",
+        "follow_up_due",
+        "interested",
+        "not_interested",
+        "negotiating",
+        "deal_confirmed",
+        "wrong_contact",
+        "no_response",
+        "do_not_contact",
+        "completed",
+    }
+
+    if current_status in protected_statuses:
+        return current_status
+
+    if score >= 80:
+        return "qualified"
+
+    if score >= 60:
+        return "watch"
+
+    return "rejected"
+
+
 def main():
     """
     Command-line entry point.
