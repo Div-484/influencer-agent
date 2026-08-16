@@ -1,9 +1,14 @@
 from db import get_connection
 import json
 import math
+import sys
 
 
 def load_scoring_weights(cur):
+    """
+    Load scoring weights from the database.
+    """
+
     cur.execute("""
         SELECT signal_name, weight
         FROM scoring_config
@@ -15,7 +20,7 @@ def load_scoring_weights(cur):
         for signal_name, weight in cur.fetchall()
     }
 
-    required = {
+    required_signals = {
         "senior_decision_makers",
         "role_relevance",
         "verified_email",
@@ -23,17 +28,31 @@ def load_scoring_weights(cur):
         "contact_depth",
     }
 
-    missing = required - weights.keys()
+    missing_signals = required_signals - weights.keys()
 
-    if missing:
+    if missing_signals:
         raise ValueError(
-            f"Missing scoring configuration: {sorted(missing)}"
+            f"Missing scoring configuration: "
+            f"{sorted(missing_signals)}"
         )
 
     return weights
 
 
 def score_lead(brand_id):
+    """
+    Calculate a 0-100 lead score for a brand.
+
+    Scoring signals:
+    - Senior decision makers
+    - Role relevance
+    - Verified email coverage
+    - LinkedIn coverage
+    - Contact depth
+
+    Uses diminishing returns for count-based signals.
+    """
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -41,7 +60,12 @@ def score_lead(brand_id):
         weights = load_scoring_weights(cur)
 
         cur.execute("""
-            SELECT name, role, email, linkedin_url, confidence
+            SELECT
+                name,
+                role,
+                email,
+                linkedin_url,
+                confidence
             FROM contacts
             WHERE brand_id = %s
         """, (brand_id,))
@@ -49,18 +73,33 @@ def score_lead(brand_id):
         contacts = cur.fetchall()
 
         if not contacts:
-            raise ValueError("No contacts found for this brand.")
+            raise ValueError(
+                "No contacts found for this brand."
+            )
 
         total_contacts = len(contacts)
 
         senior_roles = (
-            "chief", "ceo", "cmo", "cto", "coo", "cfo",
-            "head", "vice president", "vp", "director"
+            "chief",
+            "ceo",
+            "cmo",
+            "cto",
+            "coo",
+            "cfo",
+            "head",
+            "vice president",
+            "vp",
+            "director",
         )
 
         relevant_roles = (
-            "engineering", "product", "sales", "commerce",
-            "marketing", "technology", "account"
+            "engineering",
+            "product",
+            "sales",
+            "commerce",
+            "marketing",
+            "technology",
+            "account",
         )
 
         senior_count = 0
@@ -71,10 +110,16 @@ def score_lead(brand_id):
         for name, role, email, linkedin, confidence in contacts:
             role_text = (role or "").lower()
 
-            if any(x in role_text for x in senior_roles):
+            if any(
+                signal in role_text
+                for signal in senior_roles
+            ):
                 senior_count += 1
 
-            if any(x in role_text for x in relevant_roles):
+            if any(
+                signal in role_text
+                for signal in relevant_roles
+            ):
                 relevant_count += 1
 
             if confidence == "verified":
@@ -82,6 +127,10 @@ def score_lead(brand_id):
 
             if linkedin:
                 linkedin_count += 1
+
+        # ---------------------------------------------
+        # Diminishing-return scoring
+        # ---------------------------------------------
 
         senior_points = (
             weights["senior_decision_makers"]
@@ -109,15 +158,36 @@ def score_lead(brand_id):
         )
 
         contributions = {
-            "senior_decision_makers": round(senior_points, 2),
-            "role_relevance": round(relevance_points, 2),
-            "verified_email": round(verified_points, 2),
-            "linkedin_coverage": round(linkedin_points, 2),
-            "contact_depth": round(depth_points, 2),
+            "senior_decision_makers": round(
+                senior_points,
+                2,
+            ),
+            "role_relevance": round(
+                relevance_points,
+                2,
+            ),
+            "verified_email": round(
+                verified_points,
+                2,
+            ),
+            "linkedin_coverage": round(
+                linkedin_points,
+                2,
+            ),
+            "contact_depth": round(
+                depth_points,
+                2,
+            ),
         }
 
-        score = round(sum(contributions.values()))
-        score = min(max(score, 0), 100)
+        score = round(
+            sum(contributions.values())
+        )
+
+        score = min(
+            max(score, 0),
+            100,
+        )
 
         rationale = {
             "score": score,
@@ -139,21 +209,13 @@ def score_lead(brand_id):
         conn.close()
 
 
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) != 2:
-        print("Usage: python lead_qualification.py <brand_id>")
-        sys.exit(1)
-
-    brand_id = sys.argv[1]
-
-    score, rationale = score_lead(brand_id)
-
-    print(f"Lead score: {score}/100")
-    print("Scoring rationale:")
-    print(json.dumps(rationale, indent=2))
 def save_lead_score(brand_id, score, rationale):
+    """
+    Persist the calculated lead score and scoring rationale.
+
+    Does not modify the lead workflow status.
+    """
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -166,7 +228,11 @@ def save_lead_score(brand_id, score, rationale):
                 scored_at = NOW(),
                 updated_at = NOW()
             WHERE brand_id = %s
-            RETURNING lead_id, score, status, scored_at;
+            RETURNING
+                lead_id,
+                score,
+                status,
+                scored_at;
         """, (
             score,
             json.dumps(rationale),
@@ -191,30 +257,76 @@ def save_lead_score(brand_id, score, rationale):
     finally:
         cur.close()
         conn.close()
-if __name__ == "__main__":
-    import sys
+
+
+def main():
+    """
+    Command-line entry point.
+    """
 
     if len(sys.argv) != 2:
-        print("Usage: python lead_qualification.py <brand_id>")
+        print(
+            "Usage: "
+            "python lead_qualification.py <brand_id>"
+        )
         sys.exit(1)
 
     brand_id = sys.argv[1]
 
-    score, rationale = score_lead(brand_id)
+    try:
+        score, rationale = score_lead(
+            brand_id
+        )
 
-    print(f"Calculated lead score: {score}/100")
+        print(
+            f"Calculated lead score: "
+            f"{score}/100"
+        )
 
-    result = save_lead_score(
-        brand_id,
-        score,
-        rationale
-    )
+        result = save_lead_score(
+            brand_id,
+            score,
+            rationale,
+        )
 
-    print("Lead score saved successfully.")
-    print(f"lead_id={result[0]}")
-    print(f"score={result[1]}")
-    print(f"status={result[2]}")
-    print(f"scored_at={result[3]}")
+        print(
+            "Lead score saved successfully."
+        )
 
-    print("\nScoring rationale:")
-    print(json.dumps(rationale, indent=2))
+        print(
+            f"lead_id={result[0]}"
+        )
+
+        print(
+            f"score={result[1]}"
+        )
+
+        print(
+            f"status={result[2]}"
+        )
+
+        print(
+            f"scored_at={result[3]}"
+        )
+
+        print(
+            "\nScoring rationale:"
+        )
+
+        print(
+            json.dumps(
+                rationale,
+                indent=2,
+            )
+        )
+
+    except Exception as error:
+        print(
+            f"Lead qualification failed: "
+            f"{error}"
+        )
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
