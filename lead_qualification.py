@@ -304,6 +304,96 @@ def get_qualification_status(score, current_status):
     return "rejected"
 
 
+def apply_qualification_status(brand_id, score, dry_run=False):
+    """
+    Apply the score-based qualification status to a lead.
+
+    Protected workflow statuses are preserved by
+    get_qualification_status().
+    """
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT
+                lead_id,
+                status
+            FROM leads
+            WHERE brand_id = %s
+            FOR UPDATE;
+        """, (brand_id,))
+
+        row = cur.fetchone()
+
+        if not row:
+            raise ValueError(
+                f"No lead found for brand_id: {brand_id}"
+            )
+
+        lead_id, current_status = row
+
+        new_status = get_qualification_status(
+            score,
+            current_status,
+        )
+
+        if new_status == current_status:
+            conn.commit()
+            return {
+                "lead_id": lead_id,
+                "old_status": current_status,
+                "new_status": current_status,
+                "changed": False,
+                "dry_run": dry_run,
+            }
+
+        cur.execute("""
+            UPDATE leads
+            SET
+                status = %s,
+                updated_at = NOW()
+            WHERE lead_id = %s
+            RETURNING
+                lead_id,
+                status,
+                updated_at;
+        """, (
+            new_status,
+            lead_id,
+        ))
+
+        updated_row = cur.fetchone()
+
+        if not updated_row:
+            raise ValueError(
+                f"Failed to update lead status: {lead_id}"
+            )
+
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+
+        return {
+            "lead_id": updated_row[0],
+            "old_status": current_status,
+            "new_status": updated_row[1],
+            "changed": True,
+            "dry_run": dry_run,
+            "updated_at": updated_row[2],
+        }
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cur.close()
+        conn.close()
+
+
 def main():
     """
     Command-line entry point.
