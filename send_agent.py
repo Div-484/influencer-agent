@@ -78,6 +78,71 @@ def send_email(to_email: str, subject: str, body: str):
         server.send_message(msg)
 
 
+def get_or_create_conversation(cur, outreach_id: str):
+    """
+    Return the conversation for an outreach.
+
+    Creates one if it does not already exist.
+    """
+
+    cur.execute(
+        """
+        SELECT conversation_id
+        FROM conversations
+        WHERE outreach_id = %s
+        ORDER BY created_at
+        LIMIT 1;
+        """,
+        (outreach_id,),
+    )
+
+    row = cur.fetchone()
+
+    if row:
+        return row[0]
+
+    cur.execute(
+        """
+        INSERT INTO conversations (outreach_id)
+        VALUES (%s)
+        RETURNING conversation_id;
+        """,
+        (outreach_id,),
+    )
+
+    return cur.fetchone()[0]
+
+
+def record_outbound_message(cur, conversation_id: str, body: str):
+    """
+    Record an outbound message in the conversation history.
+    """
+
+    cur.execute(
+        """
+        INSERT INTO messages (
+            conversation_id,
+            direction,
+            body,
+            sent_at
+        )
+        VALUES (
+            %s,
+            'outbound',
+            %s,
+            NOW()
+        )
+        RETURNING message_id;
+        """,
+        (
+            conversation_id,
+            body,
+        ),
+    )
+
+    return cur.fetchone()[0]
+
+
 def mark_sent(cur, outreach_id: str):
     cur.execute(
         """
@@ -116,10 +181,33 @@ def run(dry_run: bool):
 
             try:
                 send_email(to_email, subject, message_text)
-                mark_sent(cur, outreach_id)
+
+                conversation_id = get_or_create_conversation(
+                    cur,
+                    outreach_id,
+                )
+
+                message_id = record_outbound_message(
+                    cur,
+                    conversation_id,
+                    message_text,
+                )
+
+                mark_sent(
+                    cur,
+                    outreach_id,
+                )
+
                 conn.commit()
+
                 sent += 1
-                print(f"Sent to {contact_name} <{to_email}> | outreach_id={outreach_id}")
+
+                print(
+                    f"Sent to {contact_name} <{to_email}> "
+                    f"| outreach_id={outreach_id} "
+                    f"| conversation_id={conversation_id} "
+                    f"| message_id={message_id}"
+                )
             except Exception as e:
                 failed += 1
                 print(f"FAILED to send to {contact_name} <{to_email}>: {e}")
