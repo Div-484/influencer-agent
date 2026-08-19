@@ -10,6 +10,8 @@ Phase 1A:
 """
 
 from db import get_connection
+from reply_classifier import classify_reply
+from reply_status import get_lead_status
 
 
 def find_existing_message(cur, external_message_id: str):
@@ -35,7 +37,8 @@ def find_contact_and_outreach(cur, sender_email: str):
         """
         SELECT
             c.contact_id,
-            o.outreach_id
+            o.outreach_id,
+            o.lead_id
         FROM contacts c
         JOIN outreach o
             ON o.contact_id = c.contact_id
@@ -215,7 +218,7 @@ def process_inbound_reply(
                 "sender_email": sender_email,
             }
 
-        contact_id, outreach_id = match
+        contact_id, outreach_id, lead_id = match
 
         conversation_id = get_or_create_conversation(
             cur,
@@ -231,16 +234,47 @@ def process_inbound_reply(
 
         conversation_id = actual_conversation_id
 
+        classification = classify_reply(body)
+        new_lead_status = get_lead_status(classification)
+
+        cur.execute(
+            """
+            UPDATE conversations
+            SET classification = %s::conversation_classification,
+                updated_at = NOW()
+            WHERE conversation_id = %s;
+            """,
+            (
+                classification,
+                conversation_id,
+            ),
+        )
+
+        cur.execute(
+            """
+            UPDATE leads
+            SET status = %s::lead_status,
+                updated_at = NOW()
+            WHERE lead_id = %s;
+            """,
+            (
+                new_lead_status,
+                lead_id,
+            ),
+        )
         conn.commit()
 
         return {
             "matched": True,
             "contact_id": contact_id,
             "outreach_id": outreach_id,
+            "lead_id": lead_id,
             "conversation_id": conversation_id,
             "message_id": message_id,
             "created": created,
             "duplicate": not created,
+            "classification": classification,
+            "lead_status": new_lead_status,
         }
 
     except Exception:
