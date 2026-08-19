@@ -1,12 +1,12 @@
 ﻿"""
 Email Provider Abstraction.
 
-Phase 3.1:
+Phase 3.3:
     - Define a standard inbound email structure.
     - Define the provider interface.
-    - Keep provider-specific logic outside the reply pipeline.
-
-This module does not connect to Gmail, IMAP, or any external service.
+    - Support fetching new emails.
+    - Support retrieving an email by external message ID.
+    - Keep provider-specific logic outside the processing pipeline.
 """
 
 from dataclasses import dataclass
@@ -34,5 +34,16 @@ class EmailProvider(Protocol):
     def fetch_new_emails(self) -> list[InboundEmail]:
         """
         Return newly available inbound emails.
+        """
+        ...
+
+    def get_email(
+        self,
+        external_message_id: str,
+    ) -> InboundEmail | None:
+        """
+        Return an email by its external provider message ID.
+
+        Return None when the email cannot be found.
         """
         ...
