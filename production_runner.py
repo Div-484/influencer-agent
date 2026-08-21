@@ -14,7 +14,7 @@ import time
 from email_pipeline import process_new_emails
 from email_provider import EmailProvider
 from email_retry_runner import run_retry_cycle
-
+from followup_runner import run_followup_cycle
 
 DEFAULT_POLL_INTERVAL_SECONDS = 30
 DEFAULT_RETRY_DELAY_MINUTES = 5
@@ -38,6 +38,7 @@ def run_execution_cycle(
         "new_emails": [],
         "retries": [],
         "errors": [],
+        "followups": [],
     }
 
     try:
@@ -62,6 +63,18 @@ def run_execution_cycle(
         results["errors"].append(
             {
                 "stage": "retries",
+                "error": str(error),
+            }
+        )
+
+    try:
+        results["followups"] = run_followup_cycle(
+            limit=limit,
+        )
+    except Exception as error:
+        results["errors"].append(
+            {
+                "stage": "followups",
                 "error": str(error),
             }
         )
