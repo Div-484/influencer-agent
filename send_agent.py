@@ -1,28 +1,14 @@
-"""
-Send Agent — sends APPROVED outreach emails and marks them as sent.
+﻿"""
+Send Agent.
 
-Safety rules (by design):
-  - Only picks up rows where status = 'approved'. Drafted/rejected rows
-    are never touched.
-  - Requires an explicit --send flag to actually send anything.
-    Run with --dry-run first to preview without sending or changing
-    the database.
-  - On a successful send, sets status='sent' AND last_sent_at=now()
-    together in the same update, satisfying the database's
-    outreach_check constraint.
-  - If sending one email fails, it's skipped (left as 'approved') and
-    the script continues with the rest — one bad email won't block
-    the others.
+Sends approved outreach emails and records successful delivery.
 
-Usage:
-    python send_agent.py --dry-run
-    python send_agent.py --send
-
-Requires these in .env:
-    SMTP_EMAIL=youraddress@gmail.com
-    SMTP_APP_PASSWORD=your_16_char_app_password
-    SMTP_HOST=smtp.gmail.com      (optional, this is the default)
-    SMTP_PORT=465                 (optional, this is the default)
+Safety rules:
+  - Only approved email outreach is eligible.
+  - --dry-run never sends or changes the database.
+  - SMTP success is followed by database state recording.
+  - Follow-up completion is updated only after outreach is marked sent.
+  - Failed sends remain approved and are not marked sent.
 """
 
 import argparse
@@ -32,57 +18,110 @@ import ssl
 from email.message import EmailMessage
 
 from dotenv import load_dotenv
+
 from db import get_connection
+from followup_completion import mark_followup_sent_for_outreach
+
 
 load_dotenv()
 
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
-SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD")
+
+SMTP_HOST = os.environ.get(
+    "SMTP_HOST",
+    "smtp.gmail.com",
+)
+
+SMTP_PORT = int(
+    os.environ.get(
+        "SMTP_PORT",
+        "465",
+    )
+)
+
+SMTP_EMAIL = os.environ.get(
+    "SMTP_EMAIL"
+)
+
+SMTP_APP_PASSWORD = os.environ.get(
+    "SMTP_APP_PASSWORD"
+)
 
 
 def get_approved_email_outreach(cur):
-    """Fetches all approved, not-yet-sent email outreach, joined with
-    contact and brand info needed to actually send and write a subject."""
+    """
+    Fetch approved email outreach that has not yet been sent.
+    """
+
     cur.execute(
         """
-        SELECT o.outreach_id, o.message_text, c.email, c.name, b.name
+        SELECT
+            o.outreach_id,
+            o.message_text,
+            c.email,
+            c.name,
+            b.name
         FROM outreach o
-        JOIN contacts c ON c.contact_id = o.contact_id
-        JOIN leads l ON l.lead_id = o.lead_id
-        JOIN brands b ON b.brand_id = l.brand_id
-        WHERE o.status = 'approved' AND o.channel = 'email';
+        JOIN contacts c
+            ON c.contact_id = o.contact_id
+        JOIN leads l
+            ON l.lead_id = o.lead_id
+        JOIN brands b
+            ON b.brand_id = l.brand_id
+        WHERE o.status = 'approved'
+          AND o.channel = 'email';
         """
     )
-    return cur.fetchall()  # list of (outreach_id, message_text, email, contact_name, brand_name)
+
+    return cur.fetchall()
 
 
-def send_email(to_email: str, subject: str, body: str):
-    """Sends one email via SMTP. Raises on failure."""
+def send_email(
+    to_email: str,
+    subject: str,
+    body: str,
+):
+    """
+    Send one email through SMTP.
+    Raises on failure.
+    """
+
     if not SMTP_EMAIL or not SMTP_APP_PASSWORD:
         raise ValueError(
-            "SMTP_EMAIL / SMTP_APP_PASSWORD not set in .env. "
-            "See the top of this file for what's needed."
+            "SMTP_EMAIL / SMTP_APP_PASSWORD not set in .env."
         )
 
     msg = EmailMessage()
+
     msg["Subject"] = subject
     msg["From"] = SMTP_EMAIL
     msg["To"] = to_email
+
     msg.set_content(body)
 
     context = ssl.create_default_context()
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context) as server:
-        server.login(SMTP_EMAIL, SMTP_APP_PASSWORD)
+
+    with smtplib.SMTP_SSL(
+        SMTP_HOST,
+        SMTP_PORT,
+        context=context,
+    ) as server:
+
+        server.login(
+            SMTP_EMAIL,
+            SMTP_APP_PASSWORD,
+        )
+
         server.send_message(msg)
 
 
-def get_or_create_conversation(cur, outreach_id: str):
+def get_or_create_conversation(
+    cur,
+    outreach_id: str,
+):
     """
     Return the conversation for an outreach.
 
-    Creates one if it does not already exist.
+    Create one when it does not exist.
     """
 
     cur.execute(
@@ -103,7 +142,9 @@ def get_or_create_conversation(cur, outreach_id: str):
 
     cur.execute(
         """
-        INSERT INTO conversations (outreach_id)
+        INSERT INTO conversations (
+            outreach_id
+        )
         VALUES (%s)
         RETURNING conversation_id;
         """,
@@ -113,9 +154,13 @@ def get_or_create_conversation(cur, outreach_id: str):
     return cur.fetchone()[0]
 
 
-def record_outbound_message(cur, conversation_id: str, body: str):
+def record_outbound_message(
+    cur,
+    conversation_id: str,
+    body: str,
+):
     """
-    Record an outbound message in the conversation history.
+    Record successful outbound message.
     """
 
     cur.execute(
@@ -143,94 +188,215 @@ def record_outbound_message(cur, conversation_id: str, body: str):
     return cur.fetchone()[0]
 
 
-def mark_sent(cur, outreach_id: str):
+def mark_sent(
+    cur,
+    outreach_id: str,
+):
+    """
+    Mark outreach as successfully sent.
+    """
+
     cur.execute(
         """
         UPDATE outreach
-        SET status = 'sent', last_sent_at = now()
-        WHERE outreach_id = %s;
+        SET
+            status = 'sent',
+            last_sent_at = NOW()
+        WHERE outreach_id = %s
+          AND status = 'approved'
+        RETURNING outreach_id;
         """,
         (outreach_id,),
     )
 
+    row = cur.fetchone()
 
-def run(dry_run: bool):
+    if row is None:
+        raise RuntimeError(
+            "Outreach was not marked sent; "
+            "it may no longer be approved."
+        )
+
+    return row[0]
+
+
+def run(
+    dry_run: bool,
+):
     conn = get_connection()
     cur = conn.cursor()
 
     try:
+
         rows = get_approved_email_outreach(cur)
 
         if not rows:
-            print("No approved email outreach waiting to be sent.")
+            print(
+                "No approved email outreach waiting to be sent."
+            )
             return
 
-        print(f"Found {len(rows)} approved message(s).\n")
+        print(
+            f"Found {len(rows)} approved message(s).\n"
+        )
 
         sent = 0
         failed = 0
 
-        for outreach_id, message_text, to_email, contact_name, brand_name in rows:
-            subject = f"Collaboration opportunity with {brand_name}"
+        for (
+            outreach_id,
+            message_text,
+            to_email,
+            contact_name,
+            brand_name,
+        ) in rows:
+
+            subject = (
+                f"Collaboration opportunity with "
+                f"{brand_name}"
+            )
 
             if dry_run:
-                print(f"[DRY RUN] Would send to {contact_name} <{to_email}>")
-                print(f"          Subject: {subject}")
-                print(f"          outreach_id: {outreach_id}\n")
+
+                print(
+                    f"[DRY RUN] Would send to "
+                    f"{contact_name} <{to_email}>"
+                )
+
+                print(
+                    f"          Subject: {subject}"
+                )
+
+                print(
+                    f"          outreach_id: "
+                    f"{outreach_id}\n"
+                )
+
                 continue
 
             try:
-                send_email(to_email, subject, message_text)
 
-                conversation_id = get_or_create_conversation(
-                    cur,
-                    outreach_id,
+                # =================================================
+                # 1. SMTP
+                # =================================================
+
+                send_email(
+                    to_email,
+                    subject,
+                    message_text,
                 )
 
-                message_id = record_outbound_message(
-                    cur,
-                    conversation_id,
-                    message_text,
+                # =================================================
+                # 2. DATABASE SUCCESS RECORD
+                # =================================================
+
+                conversation_id = (
+                    get_or_create_conversation(
+                        cur,
+                        str(outreach_id),
+                    )
+                )
+
+                message_id = (
+                    record_outbound_message(
+                        cur,
+                        conversation_id,
+                        message_text,
+                    )
                 )
 
                 mark_sent(
                     cur,
-                    outreach_id,
+                    str(outreach_id),
                 )
+
+                # =================================================
+                # 3. FOLLOW-UP COMPLETION
+                # =================================================
+
+                followup_result = (
+                    mark_followup_sent_for_outreach(
+                        outreach_id=str(
+                            outreach_id
+                        ),
+                        cur=cur,
+                    )
+                )
+
+                # =================================================
+                # 4. COMMIT
+                # =================================================
 
                 conn.commit()
 
                 sent += 1
 
                 print(
-                    f"Sent to {contact_name} <{to_email}> "
+                    f"Sent to {contact_name} "
+                    f"<{to_email}> "
                     f"| outreach_id={outreach_id} "
                     f"| conversation_id={conversation_id} "
-                    f"| message_id={message_id}"
+                    f"| message_id={message_id} "
+                    f"| followup_status="
+                    f"{followup_result['status']}"
                 )
-            except Exception as e:
+
+            except Exception as error:
+
+                conn.rollback()
+
                 failed += 1
-                print(f"FAILED to send to {contact_name} <{to_email}>: {e}")
-                # this one row's failure shouldn't affect the others
+
+                print(
+                    f"FAILED to send to "
+                    f"{contact_name} <{to_email}>: "
+                    f"{error}"
+                )
 
         if dry_run:
-            print(f"\nDRY RUN complete. {len(rows)} message(s) would be sent. "
-                  f"Run with --send to actually send them.")
+
+            print(
+                f"\nDRY RUN complete. "
+                f"{len(rows)} message(s) would be sent. "
+                f"Run with --send to actually send them."
+            )
+
         else:
-            print(f"\nSUCCESS")
+
+            print("\nSUCCESS")
             print(f"Sent: {sent}")
             print(f"Failed: {failed}")
 
     finally:
+
         cur.close()
         conn.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Send approved outreach emails.")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--dry-run", action="store_true", help="Preview only, sends nothing.")
-    group.add_argument("--send", action="store_true", help="Actually send the approved emails.")
+
+    parser = argparse.ArgumentParser(
+        description="Send approved outreach emails."
+    )
+
+    group = parser.add_mutually_exclusive_group(
+        required=True
+    )
+
+    group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview only, sends nothing.",
+    )
+
+    group.add_argument(
+        "--send",
+        action="store_true",
+        help="Actually send approved emails.",
+    )
+
     args = parser.parse_args()
 
-    run(dry_run=args.dry_run)
+    run(
+        dry_run=args.dry_run
+    )
