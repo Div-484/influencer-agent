@@ -1,4 +1,4 @@
-﻿"""
+"""
 Send Agent.
 
 Sends approved outreach emails and records successful delivery.
@@ -16,7 +16,13 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
-
+from outreach_delivery_attempt import (
+    create_delivery_attempt,
+    get_next_attempt_number,
+    mark_failed,
+    mark_finalized,
+    mark_smtp_succeeded,
+)
 from dotenv import load_dotenv
 
 from db import get_connection
@@ -113,6 +119,41 @@ def send_email(
 
         server.send_message(msg)
 
+def get_smtp_succeeded_attempts(
+    cur,
+    outreach_ids,
+):
+    """
+    Return outreach IDs whose latest delivery attempt
+    already has confirmed SMTP success.
+
+    Such outreach must not be sent again automatically.
+    """
+
+    if not outreach_ids:
+        return set()
+
+    cur.execute(
+        """
+        SELECT DISTINCT ON (outreach_id)
+            outreach_id,
+            status
+        FROM outreach_delivery_attempts
+        WHERE outreach_id = ANY(%s::uuid[])
+        ORDER BY
+            outreach_id,
+            attempt_number DESC;
+        """,
+        (list(outreach_ids),),
+    )
+
+    rows = cur.fetchall()
+
+    return {
+        str(outreach_id)
+        for outreach_id, status in rows
+        if status == "smtp_succeeded"
+    }
 
 def get_or_create_conversation(
     cur,
@@ -229,6 +270,27 @@ def run(
     try:
 
         rows = get_approved_email_outreach(cur)
+        smtp_succeeded_ids = get_smtp_succeeded_attempts(
+            cur,
+            [
+                str(row[0])
+                for row in rows
+            ],
+        )
+
+        if smtp_succeeded_ids:
+            print(
+                "WARNING: "
+                f"{len(smtp_succeeded_ids)} approved "
+                "outreach item(s) have confirmed SMTP "
+                "success and will NOT be resent."
+            )
+
+        rows = [
+            row
+            for row in rows
+            if str(row[0]) not in smtp_succeeded_ids
+        ]
 
         if not rows:
             print(
@@ -274,10 +336,25 @@ def run(
 
                 continue
 
+            attempt_id = None
+
             try:
 
                 # =================================================
-                # 1. SMTP
+                # 1. CREATE INDEPENDENT DELIVERY ATTEMPT
+                # =================================================
+
+                attempt_number = get_next_attempt_number(
+                    str(outreach_id)
+                )
+
+                attempt_id = create_delivery_attempt(
+                    outreach_id=str(outreach_id),
+                    attempt_number=attempt_number,
+                )
+
+                # =================================================
+                # 2. SMTP
                 # =================================================
 
                 send_email(
@@ -286,8 +363,12 @@ def run(
                     message_text,
                 )
 
+                mark_smtp_succeeded(
+                    str(attempt_id)
+                )
+
                 # =================================================
-                # 2. DATABASE SUCCESS RECORD
+                # 3. DATABASE SUCCESS RECORD
                 # =================================================
 
                 conversation_id = (
@@ -329,6 +410,14 @@ def run(
 
                 conn.commit()
 
+                # =================================================
+                # 5. DELIVERY ATTEMPT FINALIZATION
+                # =================================================
+
+                mark_finalized(
+                    str(attempt_id)
+                )
+
                 sent += 1
 
                 print(
@@ -344,6 +433,19 @@ def run(
             except Exception as error:
 
                 conn.rollback()
+
+                if attempt_id is not None:
+                    try:
+                        mark_failed(
+                            str(attempt_id),
+                            str(error),
+                        )
+                    except Exception as tracking_error:
+                        print(
+                            "WARNING: Failed to record "
+                            "delivery attempt failure: "
+                            f"{tracking_error}"
+                        )
 
                 failed += 1
 
